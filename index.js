@@ -6,7 +6,8 @@ const {
     Routes, 
     SlashCommandBuilder, 
     PermissionsBitField, 
-    EmbedBuilder 
+    EmbedBuilder,
+    ChannelType
 } = require('discord.js');
 
 const client = new Client({
@@ -17,7 +18,7 @@ const client = new Client({
     ]
 });
 
-// 1. Define the Command with Timeframe Options
+// 1. Define the Command with Timeframe and Channel Options
 const commands = [
     new SlashCommandBuilder()
         .setName('generate-recap')
@@ -33,6 +34,12 @@ const commands = [
                     { name: 'Last 7 Days', value: '7d' },
                     { name: 'Last 30 Days', value: '30d' }
                 )
+        )
+        .addChannelOption(option =>
+            option.setName('log_channel')
+                .setDescription('Select the channel containing your webhook logs')
+                .addChannelTypes(ChannelType.GuildText)
+                .setRequired(true)
         )
 ];
 
@@ -51,10 +58,11 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     if (interaction.commandName !== 'generate-recap') return;
 
-    // Fetching up to 30 days of messages takes time, so we must defer the reply
     await interaction.deferReply();
 
     const timeframeValue = interaction.options.getString('timeframe');
+    const logsChannel = interaction.options.getChannel('log_channel');
+    
     let hoursToScrub = 6;
     let displayTitle = "6-Hour";
 
@@ -63,18 +71,17 @@ client.on('interactionCreate', async interaction => {
     else if (timeframeValue === '7d') { hoursToScrub = 24 * 7; displayTitle = "7-Day"; }
     else if (timeframeValue === '30d') { hoursToScrub = 24 * 30; displayTitle = "30-Day"; }
 
-    const channel = interaction.channel;
     const timeLimitMs = Date.now() - (hoursToScrub * 60 * 60 * 1000);
     
     let allMessages = [];
     let lastId;
 
-    // 2. Fetch all messages within the selected timeframe
+    // 2. Fetch all messages from the SELECTED logs channel
     while (true) {
         const options = { limit: 100 };
         if (lastId) options.before = lastId;
 
-        const messages = await channel.messages.fetch(options);
+        const messages = await logsChannel.messages.fetch(options);
         if (messages.size === 0) break;
 
         const validMessages = messages.filter(m => m.createdTimestamp >= timeLimitMs);
@@ -129,7 +136,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (totalCheckouts === 0 && totalCancels === 0) {
-        return interaction.editReply(`No checkout or cancellation logs found in the last ${displayTitle}.`);
+        return interaction.editReply(`No checkout or cancellation logs found in <#${logsChannel.id}> for the last ${displayTitle}.`);
     }
 
     // 4. Calculate Stick Rate & Build the Embed
@@ -139,7 +146,7 @@ client.on('interactionCreate', async interaction => {
     const recapEmbed = new EmbedBuilder()
         .setTitle(`🎉 ${displayTitle} Drop Recap - ACO Success`)
         .setColor(16724911)
-        .setDescription(`**Overview Stats:**\n📦 **Total Checkouts:** \`${totalCheckouts}\`\n💸 **Total Spend:** \`$${totalSpend.toFixed(2)}\`\n📈 **Stick Rate:** \`${stickRate}%\`\n\n**Item Breakdown:**`)
+        .setDescription(`**Overview Stats:**\n📦 **Total Checkouts:** \`${totalCheckouts}\`\n💸 **Total Spend:** \`$${totalSpend.toFixed(2)}\`\n📈 **Stick Rate:** \`${stickRate}%\`\n\n**Scrubbed Source:** <#${logsChannel.id}>\n\n**Item Breakdown:**`)
         .setFooter({ text: 'PokeSluts ACO Bot • Auto-Scraped' })
         .setTimestamp();
 
@@ -151,7 +158,7 @@ client.on('interactionCreate', async interaction => {
         });
     }
 
-    // 5. Send the finished drop card to the channel
+    // 5. Send the finished drop card to the channel where the command was typed
     await interaction.editReply({ embeds: [recapEmbed] });
 });
 
