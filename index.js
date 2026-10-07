@@ -18,7 +18,7 @@ const client = new Client({
     ]
 });
 
-// 1. Define the Command with Timeframe and Channel Options
+// 1. Slash Command Registration
 const commands = [
     new SlashCommandBuilder()
         .setName('generate-recap')
@@ -76,7 +76,7 @@ client.on('interactionCreate', async interaction => {
     let allMessages = [];
     let lastId;
 
-    // 2. Fetch all messages from the SELECTED logs channel
+    // 2. Fetch all messages from the selected channel
     while (true) {
         const options = { limit: 100 };
         if (lastId) options.before = lastId;
@@ -93,53 +93,86 @@ client.on('interactionCreate', async interaction => {
         lastId = messages.last().id;
     }
 
-    // 3. Parse the Hayha/Polar Webhooks
+    // 3. Parse Polar & Hāyhā Embeds
     const itemData = {};
     let totalCheckouts = 0;
     let totalCancels = 0;
     let totalSpend = 0;
 
     for (const msg of allMessages) {
-        if (msg.embeds.length === 0) continue;
+        if (!msg.embeds || msg.embeds.length === 0) continue;
         
         const embed = msg.embeds[0];
-        const isSuccess = embed.title && embed.title.toLowerCase().includes('success');
-        const isCancel = embed.title && (embed.title.toLowerCase().includes('decline') || embed.title.toLowerCase().includes('cancel'));
+        const title = (embed.title || "").toLowerCase();
         
+        // Exact status detection
+        const isCancel = title.includes('cancelled') || title.includes('canceled') || title.includes('declined') || title.includes('failed');
+        const isSuccess = !isCancel && title.includes('successful checkout');
+
         if (!isSuccess && !isCancel) continue;
 
-        let productName = "Unknown Item";
+        let rawProduct = "";
         let price = 0;
-        let link = "https://bandai.com";
+        let site = "";
 
-        embed.fields.forEach(field => {
-            if (field.name.toLowerCase().includes('product') || field.name.toLowerCase().includes('item')) {
-                productName = field.value.replace(/\[\vert{}\]|\(http.*?\)/g, '').trim();
-            }
-            if (field.name.toLowerCase().includes('price')) {
-                price = parseFloat(field.value.replace(/[^0-9.]/g, '')) || 0;
+        // Extract fields
+        embed.fields.forEach(f => {
+            const name = f.name.toLowerCase();
+            if (name === 'product' || name === 'item') {
+                rawProduct = f.value;
+            } else if (name === 'price') {
+                price = parseFloat(f.value.replace(/[^0-9.]/g, '')) || 0;
+            } else if (name === 'site') {
+                site = f.value;
             }
         });
 
-        if (!itemData[productName]) {
-            itemData[productName] = { checkouts: 0, cancels: 0, price: price, link: embed.url || link };
+        if (!rawProduct) continue;
+
+        // Clean up Hāyhā item format: "Pokemon ETB - $69.99"
+        if (rawProduct.includes(' - $')) {
+            const parts = rawProduct.split(' - $');
+            rawProduct = parts[0];
+            if (price === 0 && parts[1]) {
+                price = parseFloat(parts[1].replace(/[^0-9.]/g, '')) || 0;
+            }
+        }
+
+        // Clean up Polar format: "• 2x Pokemon Booster Bundle - Default"
+        let cleanName = rawProduct
+            .replace(/\[(.*?)\]\(.*?\)/g, '$1') // remove markdown links
+            .replace(/^[•\s\d+x]+/i, '')          // remove leading bullets & "2x"
+            .replace(/\s*-\s*default$/i, '')     // remove trailing "- Default"
+            .trim();
+
+        if (!itemData[cleanName]) {
+            itemData[cleanName] = { 
+                checkouts: 0, 
+                cancels: 0, 
+                price: price, 
+                site: site || "Retailer" 
+            };
+        }
+
+        if (price > 0 && itemData[cleanName].price === 0) {
+            itemData[cleanName].price = price;
         }
 
         if (isSuccess) {
-            itemData[productName].checkouts += 1;
+            itemData[cleanName].checkouts += 1;
             totalCheckouts += 1;
-            totalSpend += price;
+            totalSpend += (itemData[cleanName].price || price);
         } else if (isCancel) {
-            itemData[productName].cancels += 1;
+            itemData[cleanName].cancels += 1;
             totalCancels += 1;
         }
     }
 
     if (totalCheckouts === 0 && totalCancels === 0) {
-        return interaction.editReply(`No checkout or cancellation logs found in <#${logsChannel.id}> for the last ${displayTitle}.`);
+        return interaction.editReply(`No checkout or cancellation logs found in <#${logsChannel.id}> for the last${displayTitle}.`);
     }
 
-    // 4. Calculate Stick Rate & Build the Embed
+    // 4. Calculate Stick Rate & Build the Drop Card Embed
     const totalAttempts = totalCheckouts + totalCancels;
     const stickRate = totalAttempts > 0 ? ((totalCheckouts / totalAttempts) * 100).toFixed(1) : 0;
 
@@ -153,12 +186,12 @@ client.on('interactionCreate', async interaction => {
     for (const [itemName, data] of Object.entries(itemData)) {
         recapEmbed.addFields({
             name: `🛒 ${itemName}`,
-            value: `**Price:** \`$${data.price.toFixed(2)}\`\n**Checkouts:** \`${data.checkouts}\`\n**Cancels:** \`${data.cancels}\`\n**Link:** [Click Here](${data.link})`,
+            value: `**Site:** \`${data.site}\`\n**Est. Price:** \`$${data.price.toFixed(2)}\`\n**Checkouts:** \`${data.checkouts}\`\n**Cancels/Fails:** \`${data.cancels}\``,
             inline: true
         });
     }
 
-    // 5. Send the finished drop card to the channel where the command was typed
+    // 5. Send finished recap
     await interaction.editReply({ embeds: [recapEmbed] });
 });
 
