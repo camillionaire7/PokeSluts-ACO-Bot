@@ -6,8 +6,7 @@ const {
     Routes, 
     SlashCommandBuilder, 
     PermissionsBitField, 
-    EmbedBuilder,
-    ChannelType
+    EmbedBuilder 
 } = require('discord.js');
 
 const client = new Client({
@@ -18,7 +17,7 @@ const client = new Client({
     ]
 });
 
-// 1. Slash Command Registration
+// 1. Command Definition (Removed channel dropdown to match your current Discord cache)
 const commands = [
     new SlashCommandBuilder()
         .setName('generate-recap')
@@ -34,12 +33,6 @@ const commands = [
                     { name: 'Last 7 Days', value: '7d' },
                     { name: 'Last 30 Days', value: '30d' }
                 )
-        )
-        .addChannelOption(option =>
-            option.setName('log_channel')
-                .setDescription('Select the channel containing your webhook logs')
-                .addChannelTypes(ChannelType.GuildText)
-                .setRequired(true)
         )
 ];
 
@@ -60,8 +53,17 @@ client.on('interactionCreate', async interaction => {
 
     await interaction.deferReply();
 
+    // 2. Hardcode the 🦾︱full-logs channel ID here
+    const LOGS_CHANNEL_ID = '1548504323703705670'; 
+    
+    let logsChannel;
+    try {
+        logsChannel = await client.channels.fetch(LOGS_CHANNEL_ID);
+    } catch (error) {
+        return interaction.editReply("Could not find the logs channel. Make sure you pasted the correct ID and the bot has 'View Channel' permissions in 🦾︱full-logs.");
+    }
+
     const timeframeValue = interaction.options.getString('timeframe');
-    const logsChannel = interaction.options.getChannel('log_channel');
     
     let hoursToScrub = 6;
     let displayTitle = "6-Hour";
@@ -76,7 +78,6 @@ client.on('interactionCreate', async interaction => {
     let allMessages = [];
     let lastId;
 
-    // 2. Fetch all messages from the selected channel
     while (true) {
         const options = { limit: 100 };
         if (lastId) options.before = lastId;
@@ -93,7 +94,6 @@ client.on('interactionCreate', async interaction => {
         lastId = messages.last().id;
     }
 
-    // 3. Parse Polar & Hāyhā Embeds
     const itemData = {};
     let totalCheckouts = 0;
     let totalCancels = 0;
@@ -105,7 +105,6 @@ client.on('interactionCreate', async interaction => {
         const embed = msg.embeds[0];
         const title = (embed.title || "").toLowerCase();
         
-        // Exact status detection
         const isCancel = title.includes('cancelled') || title.includes('canceled') || title.includes('declined') || title.includes('failed');
         const isSuccess = !isCancel && title.includes('successful checkout');
 
@@ -115,7 +114,6 @@ client.on('interactionCreate', async interaction => {
         let price = 0;
         let site = "";
 
-        // Extract fields
         embed.fields.forEach(f => {
             const name = f.name.toLowerCase();
             if (name === 'product' || name === 'item') {
@@ -129,7 +127,6 @@ client.on('interactionCreate', async interaction => {
 
         if (!rawProduct) continue;
 
-        // Clean up Hāyhā item format: "Pokemon ETB - $69.99"
         if (rawProduct.includes(' - $')) {
             const parts = rawProduct.split(' - $');
             rawProduct = parts[0];
@@ -138,20 +135,14 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        // Clean up Polar format: "• 2x Pokemon Booster Bundle - Default"
         let cleanName = rawProduct
-            .replace(/\[(.*?)\]\(.*?\)/g, '$1') // remove markdown links
-            .replace(/^[•\s\d+x]+/i, '')          // remove leading bullets & "2x"
-            .replace(/\s*-\s*default$/i, '')     // remove trailing "- Default"
+            .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+            .replace(/^[•\s\d+x]+/i, '')
+            .replace(/\s*-\s*default$/i, '')
             .trim();
 
         if (!itemData[cleanName]) {
-            itemData[cleanName] = { 
-                checkouts: 0, 
-                cancels: 0, 
-                price: price, 
-                site: site || "Retailer" 
-            };
+            itemData[cleanName] = { checkouts: 0, cancels: 0, price: price, site: site || "Retailer" };
         }
 
         if (price > 0 && itemData[cleanName].price === 0) {
@@ -172,7 +163,6 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply(`No checkout or cancellation logs found in <#${logsChannel.id}> for the last${displayTitle}.`);
     }
 
-    // 4. Calculate Stick Rate & Build the Drop Card Embed
     const totalAttempts = totalCheckouts + totalCancels;
     const stickRate = totalAttempts > 0 ? ((totalCheckouts / totalAttempts) * 100).toFixed(1) : 0;
 
@@ -191,7 +181,6 @@ client.on('interactionCreate', async interaction => {
         });
     }
 
-    // 5. Send finished recap
     await interaction.editReply({ embeds: [recapEmbed] });
 });
 
