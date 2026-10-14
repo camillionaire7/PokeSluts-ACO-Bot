@@ -17,7 +17,7 @@ const client = new Client({
     ]
 });
 
-// 1. Command Definition (Removed channel dropdown to match your current Discord cache)
+// 1. Command Definitions
 const commands = [
     new SlashCommandBuilder()
         .setName('generate-recap')
@@ -33,11 +33,15 @@ const commands = [
                     { name: 'Last 7 Days', value: '7d' },
                     { name: 'Last 30 Days', value: '30d' }
                 )
-        )
+        ),
+    new SlashCommandBuilder()
+        .setName('create-invite')
+        .setDescription('Generates a clean server invite created by the bot')
+        .setDefaultMemberPermissions(PermissionsBitField.Flags.CreateInstantInvite)
 ];
 
 client.once('ready', async () => {
-    console.log(`🤖 Logged in as ${client.user.tag}!`);
+    console.log(`🤖 Logged in as \${client.user.tag}!`);
     const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
     try {
         await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
@@ -49,139 +53,164 @@ client.once('ready', async () => {
 
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
-    if (interaction.commandName !== 'generate-recap') return;
 
-    await interaction.deferReply();
+    // --- /create-invite Command ---
+    if (interaction.commandName === 'create-invite') {
+        try {
+            const invite = await interaction.channel.createInvite({
+                maxAge: 0, // Permanent link (0 = never expires)
+                maxUses: 0, // Unlimited uses
+                unique: true,
+                reason: 'Bot-generated anonymous server invite'
+            });
 
-    // 2. Hardcode the 🦾︱full-logs channel ID here
-    const LOGS_CHANNEL_ID = '1548504323703705670'; 
-    
-    let logsChannel;
-    try {
-        logsChannel = await client.channels.fetch(LOGS_CHANNEL_ID);
-    } catch (error) {
-        return interaction.editReply("Could not find the logs channel. Make sure you pasted the correct ID and the bot has 'View Channel' permissions in 🦾︱full-logs.");
-    }
-
-    const timeframeValue = interaction.options.getString('timeframe');
-    
-    let hoursToScrub = 6;
-    let displayTitle = "6-Hour";
-
-    if (timeframeValue === '6h') { hoursToScrub = 6; displayTitle = "6-Hour"; }
-    else if (timeframeValue === '24h') { hoursToScrub = 24; displayTitle = "24-Hour"; }
-    else if (timeframeValue === '7d') { hoursToScrub = 24 * 7; displayTitle = "7-Day"; }
-    else if (timeframeValue === '30d') { hoursToScrub = 24 * 30; displayTitle = "30-Day"; }
-
-    const timeLimitMs = Date.now() - (hoursToScrub * 60 * 60 * 1000);
-    
-    let allMessages = [];
-    let lastId;
-
-    while (true) {
-        const options = { limit: 100 };
-        if (lastId) options.before = lastId;
-
-        const messages = await logsChannel.messages.fetch(options);
-        if (messages.size === 0) break;
-
-        const validMessages = messages.filter(m => m.createdTimestamp >= timeLimitMs);
-        allMessages.push(...validMessages.values());
-
-        if (messages.size < 100 || validMessages.size < messages.size) {
-            break;
+            return await interaction.reply({
+                content: `Here is your invite link:\n\${invite.url}`,
+                ephemeral: true // Only you will see this message
+            });
+        } catch (error) {
+            console.error('Failed to create invite:', error);
+            return await interaction.reply({
+                content: 'Failed to create invite link. Ensure the bot has the **Create Instant Invite** permission in this channel.',
+                ephemeral: true
+            });
         }
-        lastId = messages.last().id;
     }
 
-    const itemData = {};
-    let totalCheckouts = 0;
-    let totalCancels = 0;
-    let totalSpend = 0;
+    // --- /generate-recap Command ---
+    if (interaction.commandName === 'generate-recap') {
+        await interaction.deferReply();
 
-    for (const msg of allMessages) {
-        if (!msg.embeds || msg.embeds.length === 0) continue;
+        // Hardcoded 🦾︱full-logs channel ID
+        const LOGS_CHANNEL_ID = '1548504323703705670'; 
         
-        const embed = msg.embeds[0];
-        const title = (embed.title || "").toLowerCase();
+        let logsChannel;
+        try {
+            logsChannel = await client.channels.fetch(LOGS_CHANNEL_ID);
+        } catch (error) {
+            return interaction.editReply("Could not find the logs channel. Make sure you pasted the correct ID and the bot has 'View Channel' permissions in 🦾︱full-logs.");
+        }
+
+        const timeframeValue = interaction.options.getString('timeframe');
         
-        const isCancel = title.includes('cancelled') || title.includes('canceled') || title.includes('declined') || title.includes('failed');
-        const isSuccess = !isCancel && title.includes('successful checkout');
+        let hoursToScrub = 6;
+        let displayTitle = "6-Hour";
 
-        if (!isSuccess && !isCancel) continue;
+        if (timeframeValue === '6h') { hoursToScrub = 6; displayTitle = "6-Hour"; }
+        else if (timeframeValue === '24h') { hoursToScrub = 24; displayTitle = "24-Hour"; }
+        else if (timeframeValue === '7d') { hoursToScrub = 24 * 7; displayTitle = "7-Day"; }
+        else if (timeframeValue === '30d') { hoursToScrub = 24 * 30; displayTitle = "30-Day"; }
 
-        let rawProduct = "";
-        let price = 0;
-        let site = "";
+        const timeLimitMs = Date.now() - (hoursToScrub * 60 * 60 * 1000);
+        
+        let allMessages = [];
+        let lastId;
 
-        embed.fields.forEach(f => {
-            const name = f.name.toLowerCase();
-            if (name === 'product' || name === 'item') {
-                rawProduct = f.value;
-            } else if (name === 'price') {
-                price = parseFloat(f.value.replace(/[^0-9.]/g, '')) || 0;
-            } else if (name === 'site') {
-                site = f.value;
+        while (true) {
+            const options = { limit: 100 };
+            if (lastId) options.before = lastId;
+
+            const messages = await logsChannel.messages.fetch(options);
+            if (messages.size === 0) break;
+
+            const validMessages = messages.filter(m => m.createdTimestamp >= timeLimitMs);
+            allMessages.push(...validMessages.values());
+
+            if (messages.size < 100 || validMessages.size < messages.size) {
+                break;
             }
-        });
+            lastId = messages.last().id;
+        }
 
-        if (!rawProduct) continue;
+        const itemData = {};
+        let totalCheckouts = 0;
+        let totalCancels = 0;
+        let totalSpend = 0;
 
-        if (rawProduct.includes(' - $')) {
-            const parts = rawProduct.split(' - $');
-            rawProduct = parts[0];
-            if (price === 0 && parts[1]) {
-                price = parseFloat(parts[1].replace(/[^0-9.]/g, '')) || 0;
+        for (const msg of allMessages) {
+            if (!msg.embeds || msg.embeds.length === 0) continue;
+            
+            const embed = msg.embeds[0];
+            const title = (embed.title || "").toLowerCase();
+            
+            const isCancel = title.includes('cancelled') || title.includes('canceled') || title.includes('declined') || title.includes('failed');
+            const isSuccess = !isCancel && title.includes('successful checkout');
+
+            if (!isSuccess && !isCancel) continue;
+
+            let rawProduct = "";
+            let price = 0;
+            let site = "";
+
+            embed.fields.forEach(f => {
+                const name = f.name.toLowerCase();
+                if (name === 'product' || name === 'item') {
+                    rawProduct = f.value;
+                } else if (name === 'price') {
+                    price = parseFloat(f.value.replace(/[^0-9.]/g, '')) || 0;
+                } else if (name === 'site') {
+                    site = f.value;
+                }
+            });
+
+            if (!rawProduct) continue;
+
+            if (rawProduct.includes(' - $')) {
+                const parts = rawProduct.split(' - $');
+                rawProduct = parts[0];
+                if (price === 0 && parts[1]) {
+                    price = parseFloat(parts[1].replace(/[^0-9.]/g, '')) || 0;
+                }
+            }
+
+            let cleanName = rawProduct
+                .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+                .replace(/^[•\s\d+x]+/i, '')
+                .replace(/\s*-\s*default$/i, '')
+                .trim();
+
+            if (!itemData[cleanName]) {
+                itemData[cleanName] = { checkouts: 0, cancels: 0, price: price, site: site || "Retailer" };
+            }
+
+            if (price > 0 && itemData[cleanName].price === 0) {
+                itemData[cleanName].price = price;
+            }
+
+            if (isSuccess) {
+                itemData[cleanName].checkouts += 1;
+                totalCheckouts += 1;
+                totalSpend += (itemData[cleanName].price || price);
+            } else if (isCancel) {
+                itemData[cleanName].cancels += 1;
+                totalCancels += 1;
             }
         }
 
-        let cleanName = rawProduct
-            .replace(/\[(.*?)\]\(.*?\)/g, '$1')
-            .replace(/^[•\s\d+x]+/i, '')
-            .replace(/\s*-\s*default$/i, '')
-            .trim();
-
-        if (!itemData[cleanName]) {
-            itemData[cleanName] = { checkouts: 0, cancels: 0, price: price, site: site || "Retailer" };
+        if (totalCheckouts === 0 && totalCancels === 0) {
+            return interaction.editReply(`No checkout or cancellation logs found in <#${logsChannel.id}> for the last${displayTitle}.`);
         }
 
-        if (price > 0 && itemData[cleanName].price === 0) {
-            itemData[cleanName].price = price;
+        const totalAttempts = totalCheckouts + totalCancels;
+        const stickRate = totalAttempts > 0 ? ((totalCheckouts / totalAttempts) * 100).toFixed(1) : 0;
+
+        const recapEmbed = new EmbedBuilder()
+            .setTitle(`🎉 \${displayTitle} Drop Recap - ACO Success`)
+            .setColor(16724911)
+            .setDescription(`**Overview Stats:**\n📦 **Total Checkouts:** \`${totalCheckouts}\`\n💸 **Total Spend:** \`$${totalSpend.toFixed(2)}\`\n📈 **Stick Rate:** \`${stickRate}%\`\n\n**Scrubbed Source:** <#\${logsChannel.id}>\n\n**Item Breakdown:**`)
+            .setFooter({ text: 'PokeSluts ACO Bot • Auto-Scraped' })
+            .setTimestamp();
+
+        for (const [itemName, data] of Object.entries(itemData)) {
+            recapEmbed.addFields({
+                name: `🛒 \${itemName}`,
+                value: `**Site:** \`${data.site}\`\n**Est. Price:** \`$${data.price.toFixed(2)}\`\n**Checkouts:** \`${data.checkouts}\`\n**Cancels/Fails:** \`${data.cancels}\``,
+                inline: true
+            });
         }
 
-        if (isSuccess) {
-            itemData[cleanName].checkouts += 1;
-            totalCheckouts += 1;
-            totalSpend += (itemData[cleanName].price || price);
-        } else if (isCancel) {
-            itemData[cleanName].cancels += 1;
-            totalCancels += 1;
-        }
+        await interaction.editReply({ embeds: [recapEmbed] });
     }
-
-    if (totalCheckouts === 0 && totalCancels === 0) {
-        return interaction.editReply(`No checkout or cancellation logs found in <#${logsChannel.id}> for the last${displayTitle}.`);
-    }
-
-    const totalAttempts = totalCheckouts + totalCancels;
-    const stickRate = totalAttempts > 0 ? ((totalCheckouts / totalAttempts) * 100).toFixed(1) : 0;
-
-    const recapEmbed = new EmbedBuilder()
-        .setTitle(`🎉 ${displayTitle} Drop Recap - ACO Success`)
-        .setColor(16724911)
-        .setDescription(`**Overview Stats:**\n📦 **Total Checkouts:** \`${totalCheckouts}\`\n💸 **Total Spend:** \`$${totalSpend.toFixed(2)}\`\n📈 **Stick Rate:** \`${stickRate}%\`\n\n**Scrubbed Source:** <#${logsChannel.id}>\n\n**Item Breakdown:**`)
-        .setFooter({ text: 'PokeSluts ACO Bot • Auto-Scraped' })
-        .setTimestamp();
-
-    for (const [itemName, data] of Object.entries(itemData)) {
-        recapEmbed.addFields({
-            name: `🛒 ${itemName}`,
-            value: `**Site:** \`${data.site}\`\n**Est. Price:** \`$${data.price.toFixed(2)}\`\n**Checkouts:** \`${data.checkouts}\`\n**Cancels/Fails:** \`${data.cancels}\``,
-            inline: true
-        });
-    }
-
-    await interaction.editReply({ embeds: [recapEmbed] });
 });
 
 client.login(process.env.BOT_TOKEN);
