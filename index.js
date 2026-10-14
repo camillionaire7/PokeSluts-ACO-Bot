@@ -44,8 +44,12 @@ client.once('ready', async () => {
     console.log(`🤖 Logged in as \${client.user.tag}!`);
     const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
     try {
-        await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
-        console.log('✅ Slash commands registered.');
+        // Updated with your specific server ID
+        await rest.put(
+            Routes.applicationGuildCommands(process.env.CLIENT_ID, '1431805290868641795'), 
+            { body: commands }
+        );
+        console.log('✅ Slash commands registered to the guild.');
     } catch (error) {
         console.error(error);
     }
