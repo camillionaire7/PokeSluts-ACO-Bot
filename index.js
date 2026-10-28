@@ -19,11 +19,59 @@ const client = new Client({
 
 function decodeHtml(text) {
     if (!text) return '';
-    return text
+    return String(text)
         .replace(/&#233;/g, 'é')
         .replace(/&amp;/g, '&')
         .replace(/&lt;/g, '<')
         .replace(/&gt;/g, '>');
+}
+
+// Strips markdown, custom emoji, and extra whitespace so "**❌ Failed Checkout**" -> "failed checkout"
+function normalize(text) {
+    return decodeHtml(text || '')
+        .replace(/<a?:\w+:\d+>/g, '')      // custom discord emoji
+        .replace(/[*_`~|>]/g, '')           // markdown characters
+        .replace(/[\u2192\u2794\u27A1]/g, '->') // unicode arrows -> "->"
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+}
+
+// Returns 'decline' | 'cancel' | 'success' | null for a chunk of text
+function classifyText(raw) {
+    const t = normalize(raw);
+    if (!t) return null;
+    if (/payment\s+declined|card\s+declined|declined!/.test(t)) return 'decline';
+    if (/failed\s+checkout|order\s+cancel+ed|checkout\s+failed/.test(t)) return 'cancel';
+    if (/successful\s+checkout/.test(t)) return 'success';
+    return null;
+}
+
+// True if this embed is one of the bot's own recap/summary embeds
+function isRecapEmbed(embed) {
+    const title = normalize(embed.title);
+    const footer = normalize(embed.footer && embed.footer.text);
+    return (
+        title.includes('recap') ||
+        title.includes('summary') ||
+        footer.includes('auto-scraped')
+    );
+}
+
+// Looks at the title first, then author name, then description, then message content.
+// (Some webhooks put the status in the author line or description instead of the title.)
+function classifyEmbed(embed, msg) {
+    const candidates = [
+        embed.title,
+        embed.author && embed.author.name,
+        embed.description,
+        msg.content
+    ];
+    for (const c of candidates) {
+        const result = classifyText(c);
+        if (result) return result;
+    }
+    return null;
 }
 
 const commands = [
@@ -140,33 +188,36 @@ client.on('interactionCreate', async interaction => {
         let totalSpend = 0;
         let detectedSite = "Retailer";
 
+        // Debug: titles we saw but couldn't classify (printed to console)
+        const unmatched = new Map();
+
         for (const msg of allMessages) {
-            // 1. NEVER count messages sent by the PokeSluts ACO Bot itself (only count incoming webhooks)
+            // NEVER count messages sent by this bot itself (recaps, etc.)
             if (msg.author && msg.author.id === client.user.id) continue;
             if (!msg.embeds || msg.embeds.length === 0) continue;
             
             for (const embed of msg.embeds) {
-                const rawTitle = (embed.title || "").trim();
-                const title = rawTitle.toLowerCase();
-                const fields = embed.fields || [];
+                // Skip any recap/summary embed (even from older versions of the bot / other bot accounts)
+                if (isRecapEmbed(embed)) continue;
 
-                // Extra safety: skip any recap/summary embed
-                if (title.includes('recap') || title.includes('summary')) continue;
+                const kind = classifyEmbed(embed, msg);
 
-                // 2. Exact Classification Mapping
-                // - "Payment declined!" -> Decline
-                // - "Failed Checkout" OR "Successful Checkout -> Order Cancelled..." -> Cancel
-                // - "Successful Checkout!" (without cancel) -> Successful Checkout
-                const isDecline = title.includes('payment declined');
-                const isCancel = title.includes('failed checkout') || title.includes('order cancelled') || title.includes('order canceled');
-                const isSuccess = !isCancel && !isDecline && title.includes('successful checkout');
+                if (!kind) {
+                    const label = (embed.title || embed.author?.name || embed.description || '(no text)').slice(0, 80);
+                    unmatched.set(label, (unmatched.get(label) || 0) + 1);
+                    continue;
+                }
 
-                if (!isSuccess && !isCancel && !isDecline) continue;
+                const isSuccess = kind === 'success';
+                const isCancel = kind === 'cancel';
+                const isDecline = kind === 'decline';
 
                 if (isDecline) {
                     totalDeclines += 1;
                     continue;
                 }
+
+                const fields = embed.fields || [];
 
                 // Parse Product, Price, Quantity, Site, URL
                 let rawProduct = "";
@@ -175,21 +226,32 @@ client.on('interactionCreate', async interaction => {
                 let itemUrl = embed.url || "";
 
                 fields.forEach(f => {
-                    const name = (f.name || "").toLowerCase().trim();
-                    if (name === 'product' || name === 'item') {
-                        rawProduct = decodeHtml(f.value);
+                    const name = normalize(f.name);
+                    const value = f.value || '';
+                    if (name === 'product' || name === 'products' || name === 'item') {
+                        rawProduct = decodeHtml(value);
                     } else if (name === 'price' || name === 'cost') {
-                        const parsed = parseFloat(f.value.replace(/[^0-9.]/g, ''));
+                        const parsed = parseFloat(value.replace(/[^0-9.]/g, ''));
                         if (!isNaN(parsed)) unitPrice = parsed;
                     } else if (name.includes('quant')) {
-                        const parsed = parseInt(f.value.replace(/[^\d]/g, ''), 10);
+                        const parsed = parseInt(value.replace(/[^\d]/g, ''), 10);
                         if (!isNaN(parsed) && parsed > 0) quantity = parsed;
                     } else if (name === 'site') {
-                        detectedSite = decodeHtml(f.value);
+                        detectedSite = decodeHtml(value);
                     }
                 });
 
-                if (!rawProduct) continue;
+                // Cancels/failures often have no product field - still count them
+                if (!rawProduct) {
+                    if (isCancel) {
+                        totalCancels += quantity;
+                        if (!itemData['Unknown Item']) {
+                            itemData['Unknown Item'] = { checkouts: 0, cancels: 0, price: 0, site: detectedSite, url: '' };
+                        }
+                        itemData['Unknown Item'].cancels += quantity;
+                    }
+                    continue;
+                }
 
                 // Extract URL if wrapped in markdown [Name](url)
                 const linkMatch = rawProduct.match(/\[(.*?)\]\((.*?)\)/);
@@ -248,6 +310,12 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
+        console.log(`[recap] ${displayTitle}: ${allMessages.length} msgs | success=${totalCheckouts} cancel=${totalCancels} decline=${totalDeclines}`);
+        if (unmatched.size > 0) {
+            console.log('[recap] Embeds that matched no category (check these titles):');
+            for (const [label, count] of unmatched) console.log(`   ${count}x  "${label}"`);
+        }
+
         if (totalCheckouts === 0 && totalCancels === 0 && totalDeclines === 0) {
             return interaction.editReply(`No logs found in <#${LOGS_CHANNEL_ID}> for the last ${displayTitle}.`);
         }
@@ -272,12 +340,25 @@ client.on('interactionCreate', async interaction => {
             .setFooter({ text: 'PokeSluts ACO Bot • Auto-Scraped' })
             .setTimestamp();
 
-        for (const [itemName, data] of Object.entries(itemData)) {
+        // Discord embeds allow at most 25 fields - show the top 24 by volume
+        const sortedItems = Object.entries(itemData)
+            .sort((a, b) => (b[1].checkouts + b[1].cancels) - (a[1].checkouts + a[1].cancels));
+        const shownItems = sortedItems.slice(0, 24);
+
+        for (const [itemName, data] of shownItems) {
             const linkText = data.url ? `\n**Link:** [Click Here](${data.url})` : '';
             recapEmbed.addFields({
-                name: `🛒 ${itemName}`,
+                name: `🛒 ${itemName}`.slice(0, 256),
                 value: `**Price:** \`$${data.price.toFixed(2)}\`\n**Checkouts:** \`${data.checkouts}\`\n**Cancels:** \`${data.cancels}\`${linkText}`,
                 inline: true
+            });
+        }
+
+        if (sortedItems.length > shownItems.length) {
+            recapEmbed.addFields({
+                name: '…and more',
+                value: `${sortedItems.length - shownItems.length} additional items not shown.`,
+                inline: false
             });
         }
 
