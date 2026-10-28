@@ -92,7 +92,7 @@ client.on('interactionCreate', async interaction => {
     if (interaction.commandName === 'generate-recap') {
         await interaction.deferReply();
 
-        // Always scrapes 🦾︱full-logs regardless of where you type the command
+        // Always scrapes 🦾︱full-logs regardless of which channel you run the command in
         const LOGS_CHANNEL_ID = '1548504323703705670'; 
         
         let logsChannel;
@@ -134,44 +134,48 @@ client.on('interactionCreate', async interaction => {
         }
 
         const itemData = {};
-        let totalCheckouts = 0; // Successful orders
-        let totalCancels = 0;   // Failed / Cancelled orders
+        let totalCheckouts = 0; // Valid Successful Checkouts (Units Secured)
+        let totalCancels = 0;   // Failed Checkout + Successful Checkout -> Order Cancelled...
+        let totalDeclines = 0;  // Payment declined!
         let totalSpend = 0;
         let detectedSite = "Retailer";
 
         for (const msg of allMessages) {
+            // 1. NEVER count messages sent by the PokeSluts ACO Bot itself (only count incoming webhooks)
+            if (msg.author && msg.author.id === client.user.id) continue;
             if (!msg.embeds || msg.embeds.length === 0) continue;
             
             for (const embed of msg.embeds) {
-                const title = (embed.title || "").toLowerCase();
+                const rawTitle = (embed.title || "").trim();
+                const title = rawTitle.toLowerCase();
                 const fields = embed.fields || [];
 
-                // Skip any previous Drop Recap embeds so the bot never counts itself!
+                // Extra safety: skip any recap/summary embed
                 if (title.includes('recap') || title.includes('summary')) continue;
 
-                const hasCancelField = fields.some(f => 
-                    f.name && (f.name.toLowerCase().includes('cancel') || f.name.toLowerCase().includes('reason'))
-                );
+                // 2. Exact Classification Mapping
+                // - "Payment declined!" -> Decline
+                // - "Failed Checkout" OR "Successful Checkout -> Order Cancelled..." -> Cancel
+                // - "Successful Checkout!" (without cancel) -> Successful Checkout
+                const isDecline = title.includes('payment declined');
+                const isCancel = title.includes('failed checkout') || title.includes('order cancelled') || title.includes('order canceled');
+                const isSuccess = !isCancel && !isDecline && title.includes('successful checkout');
 
-                // Check for Failed / Cancelled / Declined first
-                const isCancel = 
-                    title.includes('cancel') || 
-                    title.includes('fail') || 
-                    title.includes('decline') || 
-                    hasCancelField ||
-                    embed.color === 16716947;
+                if (!isSuccess && !isCancel && !isDecline) continue;
 
-                const isSuccess = !isCancel && title.includes('successful checkout');
+                if (isDecline) {
+                    totalDeclines += 1;
+                    continue;
+                }
 
-                if (!isSuccess && !isCancel) continue;
-
+                // Parse Product, Price, Quantity, Site, URL
                 let rawProduct = "";
                 let unitPrice = 0;
                 let quantity = 1;
                 let itemUrl = embed.url || "";
 
                 fields.forEach(f => {
-                    const name = f.name.toLowerCase();
+                    const name = (f.name || "").toLowerCase().trim();
                     if (name === 'product' || name === 'item') {
                         rawProduct = decodeHtml(f.value);
                     } else if (name === 'price' || name === 'cost') {
@@ -185,7 +189,6 @@ client.on('interactionCreate', async interaction => {
                     }
                 });
 
-                // Never log an "Unknown Item" if a message doesn't have a product field
                 if (!rawProduct) continue;
 
                 // Extract URL if wrapped in markdown [Name](url)
@@ -211,7 +214,7 @@ client.on('interactionCreate', async interaction => {
                     }
                 }
 
-                // Clean product name so Polar & Hāyhā logs merge into the same item
+                // Standardize product name so Polar & Hāyhā logs merge into the exact same key
                 let cleanName = rawProduct
                     .replace(/\s*[-–—]\s*default$/i, '')
                     .replace(/^\[|\]$/g, '')
@@ -245,21 +248,24 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        if (totalCheckouts === 0 && totalCancels === 0) {
-            return interaction.editReply(`No checkout or cancellation logs found in <#${LOGS_CHANNEL_ID}> for the last ${displayTitle}.`);
+        if (totalCheckouts === 0 && totalCancels === 0 && totalDeclines === 0) {
+            return interaction.editReply(`No logs found in <#${LOGS_CHANNEL_ID}> for the last ${displayTitle}.`);
         }
 
-        const totalAttempts = totalCheckouts + totalCancels;
-        const stickRate = totalAttempts > 0 ? ((totalCheckouts / totalAttempts) * 100).toFixed(1) : '0.0';
+        const totalOrdersPlaced = totalCheckouts + totalCancels;
+        const stickRate = totalOrdersPlaced > 0 ? ((totalCheckouts / totalOrdersPlaced) * 100).toFixed(1) : '0.0';
 
+        // Removed "Success" from title so even older parsers never confuse a Recap with a checkout
         const recapEmbed = new EmbedBuilder()
-            .setTitle(`🎉 ${displayTitle} Drop Recap - ACO Success`)
-            .setColor(16724911)
+            .setTitle(`🎉 ${displayTitle} Drop Recap & Summary`)
+            .setColor(3066993)
             .setDescription(
                 `**Overview Stats:**\n` +
-                `📦 **Total Checkouts:** \`${totalCheckouts}\`\n` +
-                `❌ **Total Cancels/Fails:** \`${totalCancels}\`\n` +
-                `💸 **Total Spend:** \`$${totalSpend.toFixed(2)}\`\n` +
+                `📦 **Total Orders Placed:** \`${totalOrdersPlaced}\`\n` +
+                `✅ **Successful Checkouts:** \`${totalCheckouts}\`\n` +
+                `❌ **Cancelled Orders:** \`${totalCancels}\`\n` +
+                `🛑 **Payment Declines:** \`${totalDeclines}\`\n` +
+                `💸 **Net Total Spend:** \`$${totalSpend.toFixed(2)}\`\n` +
                 `📈 **Stick Rate:** \`${stickRate}%\`\n\n` +
                 `**Item Breakdown:**`
             )
